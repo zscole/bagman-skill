@@ -71,12 +71,14 @@ cd examples && python test_suite.py
 | `examples/sanitizer.py` | Output sanitization (keys, seeds, tokens) |
 | `examples/validator.py` | Input validation (prompt injection defense) |
 | `examples/session_keys.py` | ERC-4337 session key configuration |
+| `examples/delegation_integration.ts` | MetaMask Delegation Framework (EIP-7710) |
 | `examples/pre-commit` | Git hook to block secret commits |
 | `examples/test_suite.py` | Adversarial test suite |
 | `docs/prompt-injection.md` | Deep dive on injection defense |
 | `docs/secure-storage.md` | Secret storage patterns |
 | `docs/session-keys.md` | Session key architecture |
 | `docs/leak-prevention.md` | Output sanitization patterns |
+| `docs/delegation-framework.md` | On-chain permission enforcement (EIP-7710) |
 
 ---
 
