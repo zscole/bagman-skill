@@ -116,6 +116,21 @@ def is_safe(text: str) -> bool:
     return not any(re.search(p, text_lower) for p in DANGEROUS_PATTERNS)
 ```
 
+### Autonomous Operation
+
+Agents operate within bounds without per-transaction approvals. Delegation caveats enforce limits on-chain:
+
+```python
+# Autonomous-first: no confirmation needed for normal operations
+ALLOWED_OPS = {
+    "transfer": AllowedOperation(
+        handler=transfer,
+        max_value=Decimal("500"),       # Software backup limit
+        requires_confirmation=False,     # Delegation caveats are primary protection
+    ),
+}
+```
+
 ### Session Keys (ERC-4337)
 
 ```typescript

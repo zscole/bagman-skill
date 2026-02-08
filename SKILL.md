@@ -79,6 +79,7 @@ cd examples && python test_suite.py
 | `docs/session-keys.md` | Session key architecture |
 | `docs/leak-prevention.md` | Output sanitization patterns |
 | `docs/delegation-framework.md` | On-chain permission enforcement (EIP-7710) |
+| `docs/autonomous-operation.md` | Autonomous vs. supervised modes |
 
 ---
 
@@ -206,7 +207,9 @@ if result.level == ThreatLevel.SUSPICIOUS:
 
 ## 4. Operation Allowlisting
 
-Never execute arbitrary operations. Explicit whitelist only:
+Never execute arbitrary operations. Explicit whitelist only.
+
+**Autonomous-first design:** Agents should operate within bounds without asking for approval on every transaction. Use on-chain delegation caveats as the primary protection, software limits as backup.
 
 ```python
 from dataclasses import dataclass
@@ -218,23 +221,31 @@ class AllowedOperation:
     name: str
     handler: callable
     max_value: Optional[Decimal] = None
-    requires_confirmation: bool = False
+    requires_confirmation: bool = False  # Default: autonomous
     cooldown_seconds: int = 0
 
+# Autonomous operations (no confirmation needed - delegation caveats enforce limits)
 ALLOWED_OPS = {
     "check_balance": AllowedOperation("check_balance", get_balance),
     "transfer_usdc": AllowedOperation(
         "transfer_usdc", 
         transfer,
-        max_value=Decimal("500"),
-        requires_confirmation=True,
-        cooldown_seconds=60
+        max_value=Decimal("500"),      # Software limit (backup)
+        requires_confirmation=False,    # On-chain caveats are primary protection
+        cooldown_seconds=0
     ),
     "swap": AllowedOperation(
         "swap",
         swap_tokens,
         max_value=Decimal("1000"),
-        cooldown_seconds=300
+        requires_confirmation=False,
+        cooldown_seconds=0
+    ),
+    # Only require confirmation for exceptional cases
+    "emergency_withdraw": AllowedOperation(
+        "emergency_withdraw",
+        emergency_withdraw,
+        requires_confirmation=True,     # Human-in-the-loop for emergencies
     ),
 }
 
@@ -253,11 +264,21 @@ def execute(op_name: str, **kwargs):
     return op.handler(**kwargs)
 ```
 
+### When to Use Each Protection Layer
+
+| Layer | Use When | Example |
+|-------|----------|---------|
+| **Delegation caveats** (primary) | Normal autonomous operation | Daily trading, payments |
+| **Software limits** (backup) | Defense in depth | max_value checks |
+| **Confirmation codes** (opt-in) | Exceptional high-risk actions | Emergency withdrawals, revoking access |
+
 ---
 
-## 5. Confirmation Flow
+## 5. Confirmation Flow (Opt-In)
 
-High-value operations require explicit confirmation:
+**Most agents should NOT use this for normal operations.** Delegation caveats provide on-chain protection without friction.
+
+Use confirmation codes only for exceptional cases where human oversight is required:
 
 ```python
 import hashlib
