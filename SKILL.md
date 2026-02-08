@@ -292,7 +292,9 @@ def confirm(code: str):
 
 ## 6. Session Keys (ERC-4337)
 
-Instead of giving agents master keys, issue bounded session keys:
+Instead of giving agents master keys, issue bounded session keys.
+
+> **💡 Alternative:** For a vendor-neutral, standard-based approach, see [ERC-7710 Delegations](docs/erc7710-delegations.md) using MetaMask Smart Accounts Kit. ERC-7710 offers off-chain delegation creation (no gas), EOA delegates, and native sub-delegation chains.
 
 ```python
 from session_keys import SessionKeyManager

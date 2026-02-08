@@ -65,7 +65,8 @@ Or copy the `openclaw/` directory to your skills folder.
 |----------|-------------|
 | [SKILL.md](SKILL.md) | Main skill file (portable to any Claude agent) |
 | [docs/secure-storage.md](docs/secure-storage.md) | 1Password CLI patterns |
-| [docs/session-keys.md](docs/session-keys.md) | ERC-4337 delegation patterns |
+| [docs/session-keys.md](docs/session-keys.md) | ERC-4337 delegation patterns (ZeroDev) |
+| [docs/erc7710-delegations.md](docs/erc7710-delegations.md) | ERC-7710 delegation patterns (MetaMask) |
 | [docs/leak-prevention.md](docs/leak-prevention.md) | Pre-commit hooks, sanitization |
 | [docs/prompt-injection.md](docs/prompt-injection.md) | Input validation, allowlisting |
 
