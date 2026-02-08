@@ -1,0 +1,29 @@
+{
+  "name": "bagman-skill",
+  "version": "1.0.0",
+  "description": "Secure key management patterns for AI agents handling wallets, private keys, and secrets.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "example": "examples"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zscole/bagman-skill.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/zscole/bagman-skill/issues"
+  },
+  "homepage": "https://github.com/zscole/bagman-skill#readme",
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "viem": "^2.45.1"
+  }
+}

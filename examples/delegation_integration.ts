@@ -302,7 +302,6 @@ export function buildAgentDelegation(
     authority: '0x0000000000000000000000000000000000000000000000000000000000000000' as Hex,
     caveats,
     salt: BigInt(Date.now()),
-    signature: '0x' as Hex, // To be signed by delegator
   };
 }
 
