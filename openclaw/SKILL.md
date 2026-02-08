@@ -1,5 +1,6 @@
 ---
 name: bagman
+version: 1.0.0
 description: Secure key management for AI agents. Use when handling private keys, API secrets, wallet credentials, or when building systems that need agent-controlled funds. Covers secure storage, session keys, leak prevention, and prompt injection defense.
 homepage: https://numbergroup.xyz
 metadata:
