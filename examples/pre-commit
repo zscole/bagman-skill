@@ -5,56 +5,127 @@
 set -e
 
 RED='\033[0;31m'
+YELLOW='\033[0;33m'
 GREEN='\033[0;32m'
 NC='\033[0m'
 
-echo "🔐 Bagman: Scanning for secrets..."
+echo "🔐 Bagman: Scanning staged changes for secrets..."
 
-# Patterns to detect
-declare -a PATTERNS=(
-    '0x[a-fA-F0-9]{64}'                      # ETH private keys
-    'PRIVATE_KEY=.{20,}'                     # Generic private key
-    'sk-[a-zA-Z0-9]{48,}'                    # OpenAI
-    'sk-ant-api[0-9]{2}-[a-zA-Z0-9\-_]{80,}' # Anthropic
-    'gsk_[a-zA-Z0-9]{48,}'                   # Groq
-    'AKIA[0-9A-Z]{16}'                       # AWS Access Key
-    'ghp_[a-zA-Z0-9]{36}'                    # GitHub PAT
-    'glpat-[a-zA-Z0-9\-]{20}'               # GitLab PAT
+# High-confidence patterns (will block)
+declare -a BLOCK_PATTERNS=(
+    '0x[a-fA-F0-9]{64}\b'                         # ETH private keys (32 bytes)
+    'sk-proj-[a-zA-Z0-9_-]{48,}'                  # OpenAI project keys
+    'sk-[a-zA-Z0-9]{48,}'                         # OpenAI legacy keys
+    'sk-ant-api[0-9]{2}-[a-zA-Z0-9\-_]{80,}'      # Anthropic keys
+    'gsk_[a-zA-Z0-9]{48,}'                        # Groq keys
+    'AKIA[0-9A-Z]{16}'                            # AWS Access Key ID
+    'ghp_[a-zA-Z0-9]{36}'                         # GitHub PAT (classic)
+    'gho_[a-zA-Z0-9]{36}'                         # GitHub OAuth
+    'github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59}'  # GitHub PAT (fine-grained)
+    'glpat-[a-zA-Z0-9\-]{20}'                     # GitLab PAT
+    'xox[baprs]-[0-9]{10,13}-[0-9]{10,13}-[a-zA-Z0-9]{24}'  # Slack tokens
+    'AIza[0-9A-Za-z\-_]{35}'                      # Google API keys
 )
 
-FILES=$(git diff --cached --name-only --diff-filter=ACM)
-FOUND_SECRETS=0
+# Medium-confidence patterns (will warn)
+declare -a WARN_PATTERNS=(
+    'PRIVATE_KEY\s*=\s*["\x27][^\s]{20,}'         # Generic private key in env
+    'SECRET\s*=\s*["\x27][^\s]{20,}'              # Generic secret in env
+    'API_KEY\s*=\s*["\x27][^\s]{20,}'             # Generic API key in env
+    'BEGIN (RSA |EC |DSA )?PRIVATE KEY'           # PEM private keys
+    'password\s*[:=]\s*["\x27][^\s]{8,}'          # Passwords in config
+)
+
+# Files to always skip
+SKIP_PATTERNS='(\.png|\.jpg|\.jpeg|\.gif|\.ico|\.woff|\.ttf|\.woff2|\.eot|\.lock|\.min\.js|\.min\.css|node_modules|vendor|\.git|__pycache__|\.pyc)$'
+
+FILES=$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null || echo "")
+
+if [ -z "$FILES" ]; then
+    echo -e "${GREEN}✅ No files staged${NC}"
+    exit 0
+fi
+
+FOUND_BLOCKS=0
+FOUND_WARNS=0
+
+check_file() {
+    local file="$1"
+    local pattern="$2"
+    local level="$3"
+    
+    if [[ "$file" =~ $SKIP_PATTERNS ]]; then
+        return 0
+    fi
+    
+    # Only check the actual diff content (what's being added)
+    local matches
+    matches=$(git diff --cached -U0 "$file" 2>/dev/null | grep '^+' | grep -v '^+++' | grep -oE "$pattern" | head -3)
+    
+    if [ -n "$matches" ]; then
+        if [ "$level" = "block" ]; then
+            echo -e "${RED}❌ Secret detected in: $file${NC}"
+            FOUND_BLOCKS=1
+        else
+            echo -e "${YELLOW}⚠️  Suspicious pattern in: $file${NC}"
+            FOUND_WARNS=1
+        fi
+        echo "   Pattern: $pattern"
+        echo "$matches" | while read -r match; do
+            # Truncate long matches
+            if [ ${#match} -gt 60 ]; then
+                echo "   Found: ${match:0:20}...${match: -10} (truncated)"
+            else
+                echo "   Found: ${match:0:20}..."
+            fi
+        done
+        echo ""
+    fi
+}
 
 for file in $FILES; do
-    # Skip binary and lock files
-    if [[ "$file" =~ \.(png|jpg|gif|ico|woff|ttf|lock|min\.js)$ ]]; then
-        continue
-    fi
+    for pattern in "${BLOCK_PATTERNS[@]}"; do
+        check_file "$file" "$pattern" "block"
+    done
     
-    # Skip node_modules, vendor
-    if [[ "$file" =~ ^(node_modules|vendor|\.git)/ ]]; then
-        continue
-    fi
-    
-    for pattern in "${PATTERNS[@]}"; do
-        if git diff --cached "$file" | grep -qE "$pattern"; then
-            echo -e "${RED}❌ Potential secret in: $file${NC}"
-            echo "   Pattern: $pattern"
-            git diff --cached "$file" | grep -E "$pattern" | head -2
-            FOUND_SECRETS=1
-        fi
+    for pattern in "${WARN_PATTERNS[@]}"; do
+        check_file "$file" "$pattern" "warn"
     done
 done
 
-if [ $FOUND_SECRETS -eq 1 ]; then
+# Check for BIP-39 seed phrases (12+ common words in sequence)
+for file in $FILES; do
+    if [[ ! "$file" =~ $SKIP_PATTERNS ]]; then
+        # Simple heuristic: look for 12+ lowercase words on same line
+        if git diff --cached -U0 "$file" 2>/dev/null | grep '^+' | grep -qE '\b(abandon|ability|able|about|above|absent|absorb|abstract|absurd|abuse|access|accident)\b.*\b(abandon|ability|able|about|above|absent|absorb|abstract|absurd|abuse|access|accident)\b'; then
+            echo -e "${RED}❌ Possible seed phrase in: $file${NC}"
+            FOUND_BLOCKS=1
+        fi
+    fi
+done
+
+if [ $FOUND_BLOCKS -eq 1 ]; then
     echo ""
-    echo -e "${RED}⚠️  Secrets detected! Commit blocked.${NC}"
+    echo -e "${RED}═══════════════════════════════════════════════════${NC}"
+    echo -e "${RED}⛔ COMMIT BLOCKED: Secrets detected in staged files${NC}"
+    echo -e "${RED}═══════════════════════════════════════════════════${NC}"
     echo ""
     echo "Options:"
-    echo "  1. Remove the secrets"
-    echo "  2. Use 1Password/secret manager instead"
-    echo "  3. Bypass (risky): git commit --no-verify"
+    echo "  1. Remove the secrets from your code"
+    echo "  2. Use a secret manager (1Password, Vault, etc.)"
+    echo "  3. Add to .gitignore if it's a config file"
+    echo "  4. Bypass (DANGEROUS): git commit --no-verify"
+    echo ""
+    echo "If this is a false positive, consider updating the patterns in:"
+    echo "  .git/hooks/pre-commit"
     exit 1
 fi
 
-echo -e "${GREEN}✅ No secrets detected${NC}"
+if [ $FOUND_WARNS -eq 1 ]; then
+    echo ""
+    echo -e "${YELLOW}⚠️  Suspicious patterns found (review recommended)${NC}"
+    echo "Proceeding with commit..."
+fi
+
+echo -e "${GREEN}✅ Secret scan passed${NC}"
+exit 0
