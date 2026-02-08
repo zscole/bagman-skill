@@ -66,6 +66,7 @@ Or copy the `openclaw/` directory to your skills folder.
 | [SKILL.md](SKILL.md) | Main skill file (portable to any Claude agent) |
 | [docs/secure-storage.md](docs/secure-storage.md) | 1Password CLI patterns |
 | [docs/session-keys.md](docs/session-keys.md) | ERC-4337 delegation patterns |
+| [docs/delegation-framework.md](docs/delegation-framework.md) | **EIP-7710 on-chain permissions** |
 | [docs/leak-prevention.md](docs/leak-prevention.md) | Pre-commit hooks, sanitization |
 | [docs/prompt-injection.md](docs/prompt-injection.md) | Input validation, allowlisting |
 
@@ -132,6 +133,32 @@ const sessionKey = await smartAccount.createSessionKey({
 });
 ```
 
+### On-Chain Permissions (EIP-7710)
+
+For production deployments, use [MetaMask's Delegation Framework](https://github.com/MetaMask/delegation-framework) for cryptographically enforced limits:
+
+```typescript
+import { buildAgentDelegation, tradingAgentPreset } from './examples/delegation_integration';
+
+// Create bounded delegation with on-chain enforcement
+const delegation = buildAgentDelegation(
+  agentAddress,
+  userSmartAccount,
+  {
+    allowedTargets: [USDC_ADDRESS, UNISWAP_ROUTER],
+    tokenLimits: [{ token: USDC_ADDRESS, maxDecrease: 1000n * 10n**6n }],
+    validForSeconds: 24 * 3600,
+    maxCalls: 50,
+  },
+  config
+);
+
+// Or use presets
+const permissions = tradingAgentPreset(tokens, dexRouter, maxUsd, stablecoin);
+```
+
+See [docs/delegation-framework.md](docs/delegation-framework.md) for full integration guide.
+
 ## Defense Layers
 
 ```
@@ -139,7 +166,7 @@ USER INPUT
     │
     ▼
 ┌────────────────────────────┐
-│ Layer 1: Input Validation  │  ← Block injection patterns
+│ Layer 1: Input Validation  │  ← Block injection patterns (bagman)
 └────────────────────────────┘
     │
     ▼
@@ -154,11 +181,16 @@ USER INPUT
     │
     ▼
 ┌────────────────────────────┐
-│ Layer 4: Isolated Exec     │  ← Wallet separate from convo
+│ Layer 4: On-Chain Caveats  │  ← EIP-7710 delegation enforcement
 └────────────────────────────┘
     │
     ▼
-OUTPUT (sanitized)
+┌────────────────────────────┐
+│ Layer 5: Isolated Exec     │  ← Wallet separate from convo
+└────────────────────────────┘
+    │
+    ▼
+OUTPUT (sanitized by bagman)
 ```
 
 ## Common Mistakes
