@@ -10,257 +10,207 @@ Secure key management patterns for AI agents handling wallets, private keys, and
 
 ## Quick Start
 
-### For Claude/LLM Agents
+### Choose Your Backend
 
-Copy `SKILL.md` into your agent's context or skill directory. The skill provides:
+Bagman supports multiple secret storage backends. **No 1Password required.**
 
-- Secure storage patterns (1Password CLI integration)
-- Output sanitization (regex patterns to catch keys)
-- Input validation (prompt injection defense)
-- Session key architecture (bounded delegation)
+| Backend | Setup | Best For |
+|---------|-------|----------|
+| **macOS Keychain** | None (native) | macOS users, zero setup |
+| **1Password CLI** | `brew install 1password-cli` | Teams, rich metadata |
+| **Encrypted File** | `brew install age` | Portable, git-friendly |
+| **Environment Vars** | None | CI/CD, containers |
 
-### For OpenClaw
+Bagman auto-detects the best available backend.
 
-The skill is available on [ClawHub](https://clawhub.com):
+### Install
 
 ```bash
-clawhub install bagman
+# Clone
+git clone https://github.com/zscole/bagman-skill.git
+cd bagman-skill
+
+# Optional: Install backend dependencies
+brew install age          # For encrypted file backend
+brew install 1password-cli  # For 1Password backend
 ```
 
-Or copy the `openclaw/` directory to your skills folder.
+### Usage
 
-## Core Principles
+```python
+from examples.secret_manager import get_secret, get_session_key
+
+# Auto-detects backend
+api_key = get_secret("openai-key")
+
+# With session metadata
+creds = get_session_key("trading-bot")
+if creds.is_expired():
+    raise ValueError("Session expired")
+    
+print(f"Backend: {creds.backend}")
+print(f"Expires: {creds.time_remaining()}")
+```
+
+### Force Specific Backend
+
+```python
+from examples.backends import get_backend
+
+# Force macOS Keychain
+backend = get_backend("keychain")
+
+# Force 1Password
+backend = get_backend("1password", vault="My-Vault")
+
+# Force encrypted file
+backend = get_backend("encrypted_file", path="~/.secrets.age")
+
+# Force environment variables
+backend = get_backend("env")
+```
+
+Or via environment variable:
+```bash
+export BAGMAN_BACKEND=keychain
+```
+
+---
+
+## Backends
+
+### macOS Keychain (Default on macOS)
+
+Zero setup required. Uses native `security` CLI.
+
+```bash
+# Store secret
+security add-generic-password -s bagman-agent -a my-key -w "secret-value"
+
+# Or via Python
+from examples.backends import get_backend
+backend = get_backend("keychain")
+backend.set("my-key", "secret-value")
+```
+
+### 1Password CLI
+
+Rich metadata support (expiration, spending caps, allowed contracts).
+
+```bash
+# Setup
+brew install 1password-cli
+eval $(op signin)
+op vault create "Agent-Credentials"
+
+# Store with metadata
+op item create \
+  --vault "Agent-Credentials" \
+  --category "API Credential" \
+  --title "trading-bot-session" \
+  --field "password=0xsession..." \
+  --field "expires=2026-02-15T00:00:00Z" \
+  --field "spending-cap=1000 USDC" \
+  --field "allowed-contracts=0xDEX1,0xDEX2"
+```
+
+### Encrypted File (age)
+
+Portable encrypted JSON file. Works anywhere.
+
+```bash
+# Setup
+brew install age
+
+# Set passphrase
+export BAGMAN_PASSPHRASE="your-passphrase"
+
+# Or use identity file
+age-keygen -o ~/.bagman/identity.txt
+```
+
+Secrets stored in `~/.bagman/secrets.age`.
+
+### Environment Variables
+
+Fallback that always works. Secrets prefixed with `BAGMAN_`.
+
+```bash
+export BAGMAN_TRADING_BOT_KEY="0x1234..."
+export BAGMAN_OPENAI_KEY="sk-..."
+```
+
+```python
+key = get_secret("trading-bot-key")  # Reads BAGMAN_TRADING_BOT_KEY
+```
+
+---
+
+## Core Rules
+
+| Rule | Why |
+|------|-----|
+| Never store raw private keys | Config, env, memory, or conversation = leaked |
+| Use delegated access | Session keys with time/value/scope limits |
+| Secrets via secret manager | Any supported backend |
+| Sanitize all outputs | Scan for key patterns before any response |
+| Validate all inputs | Check for injection attempts before wallet ops |
+
+---
+
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────┐
 │                   AI Agent                          │
 ├─────────────────────────────────────────────────────┤
 │  Session Key (bounded)                              │
-│  - Expires after N hours                            │
-│  - Max spend per tx/day                             │
-│  - Whitelist of contracts                           │
+│  ├─ Expires after N hours                           │
+│  ├─ Max spend per tx/day                            │
+│  └─ Whitelist of allowed contracts/methods          │
 ├─────────────────────────────────────────────────────┤
-│  Secret Manager (1Password/Vault)                   │
-│  - Retrieve at runtime only                         │
-│  - Never persist to disk                            │
-│  - Audit trail                                      │
+│  Secret Manager (Auto-detect Backend)               │
+│  ├─ macOS Keychain (native)                         │
+│  ├─ 1Password CLI (rich metadata)                   │
+│  ├─ Encrypted file (portable)                       │
+│  └─ Environment vars (fallback)                     │
 ├─────────────────────────────────────────────────────┤
 │  Smart Account (ERC-4337)                           │
-│  - Programmable permissions                         │
-│  - Recovery without exposure                        │
+│  ├─ Programmable permissions                        │
+│  └─ Recovery without key exposure                   │
 └─────────────────────────────────────────────────────┘
 ```
 
-### The Rules
+---
 
-1. **Never store raw private keys** — Not in config, env, memory, or conversation
-2. **Use delegated access** — Session keys with time/value/scope limits
-3. **Secrets via secret manager** — 1Password CLI, Vault, AWS Secrets Manager
-4. **Sanitize all outputs** — Scan for key patterns before any response
-5. **Validate all inputs** — Check for injection attempts before wallet ops
+## Files
 
-## Documentation
+| File | Purpose |
+|------|---------|
+| `SKILL.md` | Main skill file (portable to any Claude agent) |
+| `examples/secret_manager.py` | Unified secret manager with auto-detection |
+| `examples/backends/` | Backend implementations |
+| `examples/sanitizer.py` | Output sanitization |
+| `examples/validator.py` | Input validation (injection defense) |
+| `examples/session_keys.py` | ERC-4337 session key configuration |
+| `docs/` | Deep-dive documentation |
 
-| Document | Description |
-|----------|-------------|
-| [SKILL.md](SKILL.md) | Main skill file (portable to any Claude agent) |
-| [docs/secure-storage.md](docs/secure-storage.md) | 1Password CLI patterns |
-| [docs/session-keys.md](docs/session-keys.md) | ERC-4337 delegation patterns |
-| [docs/delegation-framework.md](docs/delegation-framework.md) | **EIP-7710 on-chain permissions** |
-| [docs/leak-prevention.md](docs/leak-prevention.md) | Pre-commit hooks, sanitization |
-| [docs/prompt-injection.md](docs/prompt-injection.md) | Input validation, allowlisting |
+---
 
-## Examples
-
-### Retrieve Secret at Runtime
+## For OpenClaw
 
 ```bash
-# Never store - retrieve when needed
-SESSION_KEY=$(op read "op://Agents/my-agent/session-key")
-
-# Or inject via template (key never touches disk)
-op run --env-file=.env.tpl -- python agent.py
-```
-
-### Output Sanitization
-
-```python
-import re
-
-KEY_PATTERNS = [
-    (r'0x[a-fA-F0-9]{64}', '[ETH_KEY_REDACTED]'),
-    (r'sk-[a-zA-Z0-9]{48,}', '[OPENAI_KEY_REDACTED]'),
-    (r'sk-ant-api\d{2}-[a-zA-Z0-9\-_]{80,}', '[ANTHROPIC_KEY_REDACTED]'),
-]
-
-def sanitize(text: str) -> str:
-    for pattern, replacement in KEY_PATTERNS:
-        text = re.sub(pattern, replacement, text)
-    return text
-
-# Apply to EVERY agent output
-response = sanitize(response)
-```
-
-### Input Validation
-
-```python
-DANGEROUS_PATTERNS = [
-    r'(show|reveal|output).{0,20}(key|secret|private)',
-    r'ignore.{0,20}(previous|system).{0,20}instruction',
-    r'(transfer|send).{0,20}(all|everything|max)',
-]
-
-def is_safe(text: str) -> bool:
-    text_lower = text.lower()
-    return not any(re.search(p, text_lower) for p in DANGEROUS_PATTERNS)
-```
-
-### Autonomous Operation
-
-Agents operate within bounds without per-transaction approvals. Delegation caveats enforce limits on-chain:
-
-```python
-# Autonomous-first: no confirmation needed for normal operations
-ALLOWED_OPS = {
-    "transfer": AllowedOperation(
-        handler=transfer,
-        max_value=Decimal("500"),       # Software backup limit
-        requires_confirmation=False,     # Delegation caveats are primary protection
-    ),
-}
-```
-
-### Session Keys (ERC-4337)
-
-```typescript
-// Operator creates bounded session for agent
-const sessionKey = await smartAccount.createSessionKey({
-  validUntil: now + 86400,  // 24 hours
-  permissions: [
-    { target: USDC, method: "transfer", rules: [
-      { condition: "LESS_THAN", value: 1000_000000n }  // <1000 USDC
-    ]},
-  ],
-  spendingLimits: [
-    { token: USDC, limit: 5000_000000n, period: 86400 }
-  ]
-});
-```
-
-### On-Chain Permissions (EIP-7710)
-
-For production deployments, use [MetaMask's Delegation Framework](https://github.com/MetaMask/delegation-framework) for cryptographically enforced limits:
-
-```typescript
-import { buildAgentDelegation, tradingAgentPreset } from './examples/delegation_integration';
-
-// Create bounded delegation with on-chain enforcement
-const delegation = buildAgentDelegation(
-  agentAddress,
-  userSmartAccount,
-  {
-    allowedTargets: [USDC_ADDRESS, UNISWAP_ROUTER],
-    tokenLimits: [{ token: USDC_ADDRESS, maxDecrease: 1000n * 10n**6n }],
-    validForSeconds: 24 * 3600,
-    maxCalls: 50,
-  },
-  config
-);
-
-// Or use presets
-const permissions = tradingAgentPreset(tokens, dexRouter, maxUsd, stablecoin);
-```
-
-See [docs/delegation-framework.md](docs/delegation-framework.md) for full integration guide.
-
-## Defense Layers
-
-```
-USER INPUT
-    │
-    ▼
-┌────────────────────────────┐
-│ Layer 1: Input Validation  │  ← Block injection patterns (bagman)
-└────────────────────────────┘
-    │
-    ▼
-┌────────────────────────────┐
-│ Layer 2: Op Allowlisting   │  ← Explicit whitelist only
-└────────────────────────────┘
-    │
-    ▼
-┌────────────────────────────┐
-│ Layer 3: Confirmation      │  ← Time-limited codes for $$$
-└────────────────────────────┘
-    │
-    ▼
-┌────────────────────────────┐
-│ Layer 4: On-Chain Caveats  │  ← EIP-7710 delegation enforcement
-└────────────────────────────┘
-    │
-    ▼
-┌────────────────────────────┐
-│ Layer 5: Isolated Exec     │  ← Wallet separate from convo
-└────────────────────────────┘
-    │
-    ▼
-OUTPUT (sanitized by bagman)
-```
-
-## Common Mistakes
-
-| Mistake | Fix |
-|---------|-----|
-| Keys in memory files | Store reference: `[1Password: wallet-name]` |
-| Keys in .env.example | Use fake: `PRIVATE_KEY=your-key-here` |
-| Keys in error messages | Never include credentials in errors |
-| "Transfer all" requests | Block "all/everything/max" patterns |
-
-## Installation
-
-### As Claude Skill
-
-```bash
-# Copy SKILL.md to your agent's context
-cp SKILL.md /path/to/your/agent/skills/bagman/
-```
-
-### As OpenClaw Skill
-
-```bash
-# Via ClawHub
+# Install from ClawHub
 clawhub install bagman
 
-# Or manual
+# Or copy to skills
 cp -r openclaw/ ~/.openclaw/skills/bagman/
 ```
 
-### Pre-commit Hook
+The skill auto-detects available backends. No 1Password required.
 
-```bash
-# Install secret detection hook
-cp examples/pre-commit .git/hooks/
-chmod +x .git/hooks/pre-commit
-```
-
-## Requirements
-
-- **1Password CLI** (`op`) — For secure secret retrieval
-- **gitleaks** (optional) — Enhanced secret scanning
-
-```bash
-brew install 1password-cli gitleaks
-```
-
-## Contributing
-
-Issues and PRs welcome. Please ensure any examples use obviously fake keys.
+---
 
 ## License
 
 MIT
-
----
-
-Built by [Number Group](https://numbergroup.xyz) for the agentic economy.

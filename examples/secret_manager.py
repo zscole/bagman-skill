@@ -1,367 +1,176 @@
+#!/usr/bin/env python3
 """
-Bagman Secret Manager
+Unified Secret Manager for AI Agents
 
-Retrieve secrets from 1Password at runtime.
-NEVER cache, persist, or log secrets.
+Auto-detects and uses the best available backend:
+1. macOS Keychain (native, no setup on macOS)
+2. 1Password CLI (rich metadata, best UX)
+3. Local encrypted file (age encryption)
+4. Environment variables (fallback)
 
-Requires: 1Password CLI (op) - brew install 1password-cli
+Usage:
+    from secret_manager import get_secret, get_session_key
+    
+    # Simple secret retrieval
+    api_key = get_secret("openai-key")
+    
+    # Session credential with metadata
+    creds = get_session_key("trading-bot")
+    if creds.is_expired():
+        raise ValueError("Session expired")
+    print(f"Using key from {creds.backend}, expires in {creds.time_remaining()}")
 """
 
-import subprocess
-import json
-import shutil
-from datetime import datetime, timezone
-from typing import Dict, Optional, List
-from dataclasses import dataclass
-from functools import lru_cache
-import logging
-
-# Configure logging to avoid accidental secret exposure
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Ensure secrets are NEVER logged
-class SecretFilter(logging.Filter):
-    """Filter to prevent accidental secret logging."""
-    PATTERNS = ['key', 'secret', 'password', 'token', 'credential', 'session-key']
-    
-    def filter(self, record):
-        msg = str(record.msg).lower()
-        for pattern in self.PATTERNS:
-            if pattern in msg and ('=' in msg or ':' in msg):
-                record.msg = "[REDACTED - potential secret in log]"
-        return True
-
-for handler in logging.root.handlers:
-    handler.addFilter(SecretFilter())
+from typing import Optional
+from backends import get_backend, list_available_backends, SecretNotFoundError
+from backends.base import SessionCredential
 
 
-@dataclass
-class SessionKeyCredentials:
-    """Validated session key credentials from 1Password."""
-    session_key: str
-    smart_account: str
-    chain_id: int
-    expires: Optional[datetime]
-    spending_limit: Optional[str]
-    allowed_contracts: List[str]
-    allowed_methods: List[str]
-    item_name: str
-    
-    def is_expired(self) -> bool:
-        """Check if session key has expired."""
-        if not self.expires:
-            return False
-        return datetime.now(timezone.utc) > self.expires
-    
-    def time_remaining(self) -> Optional[str]:
-        """Human-readable time until expiry."""
-        if not self.expires:
-            return "No expiry"
-        
-        delta = self.expires - datetime.now(timezone.utc)
-        if delta.total_seconds() <= 0:
-            return "Expired"
-        
-        hours = int(delta.total_seconds() // 3600)
-        minutes = int((delta.total_seconds() % 3600) // 60)
-        
-        if hours > 24:
-            return f"{hours // 24}d {hours % 24}h"
-        elif hours > 0:
-            return f"{hours}h {minutes}m"
-        else:
-            return f"{minutes}m"
+# Global backend instance (lazy init)
+_backend = None
 
 
-class SecretManager:
+def _get_backend():
+    global _backend
+    if _backend is None:
+        _backend = get_backend()
+        print(f"[bagman] Using secret backend: {_backend.name}")
+    return _backend
+
+
+def get_secret(key: str, backend: Optional[str] = None) -> str:
     """
-    1Password-backed secret manager for AI agents.
+    Retrieve a secret by key.
     
-    Design principles:
-    - Secrets retrieved on-demand, never cached
-    - Automatic expiry validation
-    - Structured error messages (no secret leakage)
-    - Timeout protection
+    Args:
+        key: Secret name (e.g., "trading-bot-key", "openai-api")
+        backend: Force specific backend, or None for auto-detect
+    
+    Returns:
+        Secret value
+    
+    Raises:
+        SecretNotFoundError if not found
+    
+    Example:
+        api_key = get_secret("openai-key")
     """
-    
-    DEFAULT_VAULT = "Agent-Credentials"
-    DEFAULT_TIMEOUT = 30
-    
-    def __init__(self, vault: str = None):
-        """
-        Initialize secret manager.
-        
-        Args:
-            vault: 1Password vault name (default: Agent-Credentials)
-        """
-        self.vault = vault or self.DEFAULT_VAULT
-        self._verify_cli()
-    
-    @staticmethod
-    @lru_cache(maxsize=1)
-    def _verify_cli() -> bool:
-        """Verify 1Password CLI is installed and authenticated."""
-        if not shutil.which("op"):
-            raise RuntimeError(
-                "1Password CLI (op) not found.\n"
-                "Install: brew install 1password-cli\n"
-                "Auth: eval $(op signin)"
-            )
-        
-        # Check if signed in
-        try:
-            subprocess.run(
-                ["op", "account", "list", "--format=json"],
-                capture_output=True,
-                text=True,
-                check=True,
-                timeout=10
-            )
-            return True
-        except subprocess.CalledProcessError:
-            raise RuntimeError(
-                "1Password CLI not authenticated.\n"
-                "Run: eval $(op signin)"
-            )
-    
-    def get_session_key(self, item_name: str) -> SessionKeyCredentials:
-        """
-        Retrieve and validate session key from 1Password.
-        
-        Args:
-            item_name: Name of the item in 1Password
-            
-        Returns:
-            SessionKeyCredentials with all fields validated
-            
-        Raises:
-            RuntimeError: If retrieval fails
-            ValueError: If session key is expired or invalid
-        """
-        try:
-            result = subprocess.run(
-                ["op", "item", "get", item_name,
-                 "--vault", self.vault,
-                 "--format", "json"],
-                capture_output=True,
-                text=True,
-                check=True,
-                timeout=self.DEFAULT_TIMEOUT
-            )
-        except subprocess.CalledProcessError as e:
-            # Don't expose stderr (might contain sensitive info)
-            raise RuntimeError(
-                f"Failed to retrieve '{item_name}' from vault '{self.vault}'. "
-                "Verify item exists and you have access."
-            )
-        except subprocess.TimeoutExpired:
-            raise RuntimeError(
-                f"Timeout retrieving '{item_name}'. "
-                "Check network and 1Password status."
-            )
-        
-        try:
-            item = json.loads(result.stdout)
-        except json.JSONDecodeError:
-            raise RuntimeError("Invalid response from 1Password CLI")
-        
-        # Parse fields
-        fields = {f["label"]: f.get("value") for f in item.get("fields", [])}
-        
-        # Parse and validate expiry
-        expires = None
-        expires_str = fields.get("expires") or fields.get("valid-until")
-        if expires_str:
-            try:
-                # Handle various ISO formats
-                expires_str = expires_str.replace("Z", "+00:00")
-                expires = datetime.fromisoformat(expires_str)
-                
-                if expires.tzinfo is None:
-                    expires = expires.replace(tzinfo=timezone.utc)
-            except ValueError:
-                logger.warning(f"Could not parse expiry date: {expires_str}")
-        
-        # Build credentials
-        creds = SessionKeyCredentials(
-            session_key=fields.get("session-key") or fields.get("key") or "",
-            smart_account=fields.get("smart-account") or fields.get("address") or "",
-            chain_id=int(fields.get("chain-id", 1)),
-            expires=expires,
-            spending_limit=fields.get("spending-limit"),
-            allowed_contracts=[
-                c.strip()
-                for c in (fields.get("allowed-contracts") or "").split(",")
-                if c.strip()
-            ],
-            allowed_methods=[
-                m.strip()
-                for m in (fields.get("allowed-methods") or "").split(",")
-                if m.strip()
-            ],
-            item_name=item_name,
-        )
-        
-        # Validate
-        if not creds.session_key:
-            raise ValueError(f"Item '{item_name}' has no session-key field")
-        
-        if creds.is_expired():
-            raise ValueError(
-                f"Session key '{item_name}' has expired. "
-                "Request renewal from operator."
-            )
-        
-        return creds
-    
-    def read_secret(self, reference: str) -> str:
-        """
-        Read a single secret value using op:// reference.
-        
-        Args:
-            reference: 1Password reference (e.g., op://Vault/Item/field)
-            
-        Returns:
-            Secret value (string)
-        """
-        if not reference.startswith("op://"):
-            raise ValueError("Reference must start with op://")
-        
-        try:
-            result = subprocess.run(
-                ["op", "read", reference],
-                capture_output=True,
-                text=True,
-                check=True,
-                timeout=self.DEFAULT_TIMEOUT
-            )
-            return result.stdout.strip()
-        except subprocess.CalledProcessError:
-            raise RuntimeError(
-                f"Failed to read secret reference. "
-                "Verify path and permissions."
-            )
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("Timeout reading secret")
-    
-    def list_items(self, tags: List[str] = None) -> List[Dict]:
-        """
-        List items in the vault (metadata only, no secrets).
-        
-        Args:
-            tags: Optional list of tags to filter by
-            
-        Returns:
-            List of item metadata (id, title, tags, created, updated)
-        """
-        cmd = ["op", "item", "list", "--vault", self.vault, "--format=json"]
-        
-        if tags:
-            cmd.extend(["--tags", ",".join(tags)])
-        
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=True,
-                timeout=self.DEFAULT_TIMEOUT
-            )
-            items = json.loads(result.stdout)
-            
-            # Return only safe metadata
-            return [
-                {
-                    "id": item.get("id"),
-                    "title": item.get("title"),
-                    "tags": item.get("tags", []),
-                    "created_at": item.get("created_at"),
-                    "updated_at": item.get("updated_at"),
-                }
-                for item in items
-            ]
-        except subprocess.CalledProcessError:
-            raise RuntimeError(f"Failed to list items in vault '{self.vault}'")
-    
-    def inject_to_env(self, mappings: Dict[str, str]) -> Dict[str, str]:
-        """
-        Retrieve multiple secrets and return as environment dict.
-        DO NOT persist to actual environment.
-        
-        Args:
-            mappings: Dict of ENV_VAR_NAME -> op://reference
-            
-        Returns:
-            Dict suitable for subprocess.run(env=...)
-        """
-        env = {}
-        for env_var, reference in mappings.items():
-            env[env_var] = self.read_secret(reference)
-        return env
+    if backend:
+        return get_backend(backend).get(key)
+    return _get_backend().get(key)
 
 
-# Convenience function
-def get_session_key(item_name: str, vault: str = None) -> SessionKeyCredentials:
+def get_session_key(key: str, backend: Optional[str] = None) -> SessionCredential:
     """
-    Quick retrieval of session key.
+    Retrieve a session credential with metadata.
+    
+    Returns a SessionCredential object with:
+    - key: The actual secret value
+    - expires: Optional expiration datetime
+    - spending_cap: Optional spending limit string
+    - allowed_contracts: Optional list of allowed contract addresses
+    - backend: Which backend provided this credential
     
     Example:
         creds = get_session_key("trading-bot-session")
-        client.set_signer(creds.session_key)
+        
+        if creds.is_expired():
+            raise ValueError("Session expired - request new key from operator")
+        
+        print(f"Time remaining: {creds.time_remaining()}")
+        print(f"Spending cap: {creds.spending_cap}")
+        print(f"Allowed contracts: {creds.allowed_contracts}")
+        
+        # Use the key (never log it!)
+        client.set_signer(creds.key)
     """
-    manager = SecretManager(vault=vault)
-    return manager.get_session_key(item_name)
+    if backend:
+        return get_backend(backend).get_session_credential(key)
+    return _get_backend().get_session_credential(key)
 
 
-# CLI usage
+def set_secret(key: str, value: str, backend: Optional[str] = None, **metadata) -> None:
+    """
+    Store a secret.
+    
+    Args:
+        key: Secret name
+        value: Secret value
+        backend: Force specific backend, or None for auto-detect
+        **metadata: Additional metadata (expires, spending_cap, allowed_contracts)
+    
+    Example:
+        set_secret(
+            "trading-bot-session",
+            "0x1234...",
+            expires="2026-02-15T00:00:00Z",
+            spending_cap="1000 USDC",
+            allowed_contracts=["0xDEX1", "0xDEX2"]
+        )
+    """
+    if backend:
+        get_backend(backend).set(key, value, metadata if metadata else None)
+    else:
+        _get_backend().set(key, value, metadata if metadata else None)
+
+
+def delete_secret(key: str, backend: Optional[str] = None) -> None:
+    """Delete a secret."""
+    if backend:
+        get_backend(backend).delete(key)
+    else:
+        _get_backend().delete(key)
+
+
+def list_secrets(backend: Optional[str] = None) -> list:
+    """List all secret keys (not values)."""
+    if backend:
+        return get_backend(backend).list()
+    return _get_backend().list()
+
+
+# CLI for testing
 if __name__ == "__main__":
     import sys
     
-    if len(sys.argv) < 2:
-        print("Bagman Secret Manager")
-        print("-" * 40)
-        print("Usage:")
-        print("  python secret_manager.py <item-name>     # Get session key")
-        print("  python secret_manager.py --list          # List items")
-        print("")
-        print("Examples:")
-        print("  python secret_manager.py trading-bot-session")
-        print("  python secret_manager.py --list --vault=Production")
-        sys.exit(0)
+    print("Bagman Secret Manager")
+    print("=" * 40)
+    print(f"Available backends: {list_available_backends()}")
     
-    # Parse args
-    vault = None
-    for arg in sys.argv[1:]:
-        if arg.startswith("--vault="):
-            vault = arg.split("=")[1]
+    backend = _get_backend()
+    print(f"Selected backend: {backend.name}")
+    print()
     
-    manager = SecretManager(vault=vault)
-    
-    if sys.argv[1] == "--list":
-        print(f"Items in vault '{manager.vault}':")
-        print("-" * 40)
-        try:
-            items = manager.list_items()
-            for item in items:
-                tags = ", ".join(item.get("tags", [])) or "no tags"
-                print(f"  📄 {item['title']} ({tags})")
-            print(f"\nTotal: {len(items)} items")
-        except Exception as e:
-            print(f"❌ Error: {e}")
-            sys.exit(1)
+    if len(sys.argv) > 1:
+        cmd = sys.argv[1]
+        
+        if cmd == "get" and len(sys.argv) > 2:
+            key = sys.argv[2]
+            try:
+                value = get_secret(key)
+                print(f"{key}: {value[:8]}...{value[-4:]}" if len(value) > 12 else f"{key}: ***")
+            except SecretNotFoundError as e:
+                print(f"Error: {e}")
+        
+        elif cmd == "set" and len(sys.argv) > 3:
+            key, value = sys.argv[2], sys.argv[3]
+            set_secret(key, value)
+            print(f"Stored: {key}")
+        
+        elif cmd == "list":
+            secrets = list_secrets()
+            print(f"Secrets ({len(secrets)}):")
+            for s in secrets:
+                print(f"  - {s}")
+        
+        elif cmd == "delete" and len(sys.argv) > 2:
+            key = sys.argv[2]
+            delete_secret(key)
+            print(f"Deleted: {key}")
+        
+        else:
+            print("Usage: secret_manager.py [get|set|list|delete] [key] [value]")
     else:
-        item_name = sys.argv[1]
-        try:
-            creds = manager.get_session_key(item_name)
-            print(f"✅ Retrieved: {item_name}")
-            print(f"   Smart Account: {creds.smart_account}")
-            print(f"   Chain ID: {creds.chain_id}")
-            print(f"   Time Remaining: {creds.time_remaining()}")
-            print(f"   Spending Limit: {creds.spending_limit or 'unlimited'}")
-            print(f"   Allowed Contracts: {len(creds.allowed_contracts)}")
-            print(f"   Allowed Methods: {len(creds.allowed_methods)}")
-            print(f"   Session Key: {creds.session_key[:8]}...{creds.session_key[-4:]}")
-        except Exception as e:
-            print(f"❌ Error: {e}")
-            sys.exit(1)
+        print("Usage: secret_manager.py [get|set|list|delete] [key] [value]")
+        print()
+        print("Run with no args to see available backends.")
